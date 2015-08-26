@@ -3,15 +3,19 @@ package rabbitmq
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/koding/logging"
 
 	"github.com/streadway/amqp"
 )
+
+var ReconnectDelay = time.Second * 5
 
 type Config struct {
 	Host     string
@@ -19,6 +23,8 @@ type Config struct {
 	Username string
 	Password string
 	Vhost    string
+
+	AutoReconnect bool
 }
 
 func New(c *Config, log logging.Logger) *RabbitMQ {
@@ -153,8 +159,14 @@ func (r *RabbitMQ) Dial() error {
 	// Connects opens an AMQP connection from the credentials in the URL.
 	r.conn, err = amqp.Dial(conf)
 	if err != nil {
+		if r.config.AutoReconnect && r.reconnectable(err) {
+			r.log.Info("couldn't connect to server, will try again...")
+			time.Sleep(ReconnectDelay)
+			return r.Dial()
+		}
 		return err
 	}
+	r.log.Info("connected")
 
 	r.handleErrors(r.conn)
 
@@ -210,24 +222,16 @@ func (r *RabbitMQ) handleErrors(conn *amqp.Connection) {
 			// if the computer sleeps then wakes longer than a heartbeat interval,
 			// the connection will be closed by the client.
 			// https://github.com/streadway/amqp/issues/82
+
+			if r.config.AutoReconnect && r.reconnectable(amqpErr) {
+				r.log.Info("connection lost, connecting...")
+				if err := r.Dial(); err != nil {
+					r.log.Fatal(err.Error())
+				}
+				return
+			}
+
 			r.log.Fatal(amqpErr.Error())
-
-			if strings.Contains(amqpErr.Error(), "NOT_FOUND") {
-				// do not continue
-			}
-
-			// CRITICAL Exception (320) Reason: "CONNECTION_FORCED - broker forced connection closure with reason 'shutdown'"
-			// CRITICAL Exception (501) Reason: "read tcp 127.0.0.1:5672: i/o timeout"
-			// CRITICAL Exception (503) Reason: "COMMAND_INVALID - unimplemented method"
-			if amqpErr.Code == 501 {
-				// reconnect
-			}
-
-			if amqpErr.Code == 320 {
-				// fmt.Println("tryin to reconnect")
-				// c.reconnect()
-			}
-
 		}
 	}()
 	go func() {
@@ -239,6 +243,31 @@ func (r *RabbitMQ) handleErrors(conn *amqp.Connection) {
 			}
 		}
 	}()
+}
+
+func (r *RabbitMQ) reconnectable(err error) bool {
+	if _, ok := err.(*net.OpError); ok {
+		return true
+	}
+
+	amqpErr, ok := err.(*amqp.Error)
+	if !ok {
+		return false
+	}
+
+	if strings.Contains(amqpErr.Error(), "NOT_FOUND") {
+		return false
+	}
+
+	// CRITICAL Exception (320) Reason: "CONNECTION_FORCED - broker forced connection closure with reason 'shutdown'"
+	// CRITICAL Exception (501) Reason: "read tcp 127.0.0.1:5672: i/o timeout"
+	// CRITICAL Exception (503) Reason: "COMMAND_INVALID - unimplemented method"
+	switch amqpErr.Code {
+	case 501, 320:
+		return true
+	}
+
+	return false
 }
 
 // reconnect re-connects to rabbitmq after a disconnection
