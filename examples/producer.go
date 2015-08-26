@@ -11,11 +11,12 @@ import (
 func main() {
 	rmq := rabbitmq.New(
 		&rabbitmq.Config{
-			Host:     "localhost",
-			Port:     5672,
-			Username: "guest",
-			Password: "guest",
-			Vhost:    "/",
+			Host:          "localhost",
+			Port:          5672,
+			Username:      "guest",
+			Password:      "guest",
+			Vhost:         "/",
+			AutoReconnect: true,
 		},
 		logging.NewLogger("producer"),
 	)
